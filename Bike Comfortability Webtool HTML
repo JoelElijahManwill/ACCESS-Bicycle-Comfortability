@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ACCESS Bike Comfort Tool</title>
+    <link rel="stylesheet" href="https://js.arcgis.com/4.26/esri/themes/light/main.css">
+    <script src="https://js.arcgis.com/4.26/"></script>
+    <style>
+        html, body, #viewDiv {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+        #destinationDiv {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            z-index: 1;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        #routePanel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background-color: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            z-index: 1;
+            width: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        #statusPanel {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            z-index: 1;
+            font-size: 12px;
+            display: none;
+        }
+        .route-option {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .route-option:hover {
+            background-color: #f0f0f0;
+        }
+        .route-info {
+            margin-top: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+        .route-info-item {
+            margin: 3px 0;
+        }
+        .comfort-level {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: white;
+            font-weight: bold;
+            margin-left: 5px;
+        }
+        .comfort-highest {
+            background-color: darkgreen;
+        }
+        .comfort-high {
+            background-color: lightgreen;
+            color: black; /* Adjust text color for light background */
+        }
+        .comfort-medium {
+            background-color: orange;
+        }
+        .comfort-low {
+            background-color: red;
+        }
+        #error-message {
+            color: red;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        .route-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .route-score {
+            background-color: #4CAF50;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .route-option {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .route-option:hover {
+            background-color: #f5f5f5;
+            transform: translateY(-2px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .status-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 5px 10px;
+            border-radius: 4px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+            z-index: 50;
+        }
+    </style>
+</head>
+<body>
+    <div id="viewDiv"></div>
+    <div id="statusPanel">Loading...</div>
+    <div id="destinationDiv">
+        <input type="text" id="destinationInput" placeholder="Enter destination">
+        <button class="tool-button" id="findRoutes">Find Routes</button>
+        <div id="error-message"></div>
+    </div>
+    <div id="routePanel">
+        <h3>Route Options</h3>
+        <div id="routeOptions"></div>
+    </div>
+    
+    <script>
+        // Show status panel
+        const statusPanel = document.getElementById('statusPanel');
+        statusPanel.style.display = 'block';
+        statusPanel.textContent = 'Initializing map...';
+
+        require([
+            "esri/Map",
+            "esri/views/MapView",
+            "esri/widgets/Search",
+            "esri/widgets/Home",
+            "esri/Graphic",
+            "esri/layers/GeoJSONLayer",
+            "esri/geometry/Point"
+        ], function(Map, MapView, Search, Home, Graphic, GeoJSONLayer, Point) {
+            
+            // Create map
+            var map = new Map({
+                basemap: "streets-navigation-vector"
+            });
+
+            // Create view centered on Logan, Utah
+            var view = new MapView({
+                container: "viewDiv",
+                map: map,
+                center: [-111.8338, 41.7370],
+                zoom: 13
+            });
+
+            // Update status
+            statusPanel.textContent = 'Loading bike infrastructure data...';
+
+            // Check server health and data status
+            fetch('http://127.0.0.1:5001/health')
+                .then(response => response.json())
+                .then(health => {
+                    if (health.shapefile_loaded) {
+                        statusPanel.textContent = `Loading ${health.features_count} bike infrastructure features...`;
+                        loadBikeInfrastructure();
+                    } else {
+                        throw new Error('Bike infrastructure data not loaded on server');
+                    }
+                })
+                .catch(error => {
+                    console.error('Server health check failed:', error);
+                    statusPanel.textContent = 'Error: Could not connect to server';
+                    statusPanel.style.color = 'red';
+                });
+
+            function loadBikeInfrastructure() {
+                // Create the GeoJSON layer
+                const bikeLayer = new GeoJSONLayer({
+                    url: "http://127.0.0.1:5001/bike_comfort_roads.geojson",
+                    title: "Bike Comfort Roads",
+                    opacity: 0.8,
+                    renderer: {
+                        type: "unique-value",
+                        field: "ComfortLvl",
+                        uniqueValueInfos: [
+                            { value: -1, color: [255, 0, 0], label: "Very Low Comfort" },
+                            { value: 0, color: [255, 165, 0], label: "Low Comfort" },
+                            { value: 1, color: [255, 255, 0], label: "Medium Comfort" },
+                            { value: 2, color: [0, 255, 0], label: "High Comfort" },
+                            { value: 3, color: [0, 128, 0], label: "Very High Comfort" },
+                            { value: 4, color: [0, 64, 0], label: "Excellent Comfort" }
+                        ]
+                    }
+                });
+
+                // Add the layer to the map
+                map.add(bikeLayer);
+
+                // Handle layer loading
+                bikeLayer.when(() => {
+                    statusPanel.textContent = 'Bike infrastructure loaded successfully';
+                    setTimeout(() => {
+                        statusPanel.style.display = 'none';
+                    }, 2000);
+                }, (error) => {
+                    console.error('Error loading bike layer:', error);
+                    statusPanel.textContent = 'Error loading bike infrastructure';
+                    statusPanel.style.color = 'red';
+                });
+            }
+
+            // Add Home widget
+            const homeWidget = new Home({
+                view: view
+            });
+            view.ui.add(homeWidget, "top-left");
+
+            // Add Search widget
+            const searchWidget = new Search({
+                view: view,
+                popupEnabled: false,
+                includeDefaultSources: false,
+                sources: [{
+                    name: "Logan Address Search",
+                    placeholder: "Enter address in Logan",
+                    country: "USA",
+                    city: "Logan",
+                    region: "UT"
+                }]
+            });
+            view.ui.add(searchWidget, {
+                position: "top-right",
+                index: 2
+            });
+
+            // Route planning functionality
+            let routeGraphics = [];
+            let userLocation = null;
+            let userMarker = null;
+
+            // Helper function to get comfort level text based on score (1-3 range)
+            function getComfortLevelText(score) {
+                if (score >= 2.5) return 'Highest Comfort';
+                if (score >= 2.0) return 'High Comfort';
+                if (score >= 1.5) return 'Medium Comfort';
+                if (score >= 1.0) return 'Low Comfort';
+                return 'Unknown'; // Fallback
+            }
+
+            // Helper function to get comfort level CSS class based on score (1-3 range)
+            function getComfortLevelClass(score) {
+                if (score >= 2.5) return 'comfort-highest';
+                if (score >= 2.0) return 'comfort-high';
+                if (score >= 1.5) return 'comfort-medium';
+                if (score >= 1.0) return 'comfort-low';
+                return ''; // No class if unknown
+            }
+
+            // Function to create route option HTML
+            function createRouteOption(routeFeature) {
+                const routeData = routeFeature.properties; // Get properties from the GeoJSON feature
+                const comfortLevel = getComfortLevelText(routeData.comfort_score);
+                const comfortClass = getComfortLevelClass(routeData.comfort_score);
+                
+                // Get the end address (destination)
+                const endAddress = routeData.end_address;
+                
+                // Use "Your Location" for the start address display
+                return `
+                    <div class="route-option">
+                        <div class="route-header">
+                            <strong>Route from Your Location to ${endAddress}</strong>
+                        </div>
+                        <div class="route-info">
+                            <div class="route-info-item">
+                                Overall Comfort Level: 
+                                <span class="comfort-level ${comfortClass}">${comfortLevel}</span> 
+                                (${routeData.comfort_score.toFixed(2)})
+                            </div>
+                            <div class="route-info-item">
+                                Total Length: ${routeData.total_length.toFixed(2)} miles
+                            </div>
+                            <div class="route-info-item">
+                                Number of Road Segments: ${routeData.road_segments}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Function to select a route
+            function selectRoute(routeData) {
+                // Clear existing route graphics
+                routeGraphics.forEach(graphic => view.graphics.remove(graphic));
+                routeGraphics = [];
+
+                // Add the selected route to the map
+                const routeGraphic = new Graphic({
+                    geometry: routeData.route.geometry,
+                    symbol: {
+                        type: "simple-line",
+                        color: [0, 150, 255],
+                        width: 3
+                    }
+                });
+                view.graphics.add(routeGraphic);
+                routeGraphics.push(routeGraphic);
+
+                // Zoom to the route
+                view.goTo({
+                    target: routeGraphic,
+                    padding: 50
+                });
+            }
+
+            // Get user's current location
+            if ("geolocation" in navigator) {
+                navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                        userLocation = {
+                            longitude: position.coords.longitude,
+                            latitude: position.coords.latitude
+                        };
+                        userMarker = new Graphic({
+                            geometry: new Point({
+                                longitude: userLocation.longitude,
+                                latitude: userLocation.latitude
+                            }),
+                            symbol: {
+                                type: "simple-marker",
+                                color: [0, 150, 255],
+                                size: "12px",
+                                outline: {
+                                    color: [255, 255, 255],
+                                    width: 2
+                                }
+                            }
+                        });
+                        view.graphics.add(userMarker);
+                        console.log("User location set:", userLocation);
+                    },
+                    function(error) {
+                        console.error("Error getting location:", error);
+                        alert("Unable to get your location. Please enable location services in your browser.");
+                    }
+                );
+            } else {
+                alert("Geolocation is not supported by your browser");
+            }
+
+            // Update the clearRoutes functionality
+            function clearRoutes() {
+                routeGraphics.forEach(graphic => {
+                    if (graphic.type === 'legend') {
+                        // Remove legend div
+                        graphic.element.remove();
+                    } else {
+                        // Remove graphic from map
+                        view.graphics.remove(graphic);
+                    }
+                });
+                routeGraphics = [];
+            }
+
+            // Update the Find Routes click event
+            document.getElementById('findRoutes').addEventListener('click', async function() {
+                clearRoutes();
+                const destinationAddress = document.getElementById('destinationInput').value;
+                if (!destinationAddress) {
+                    showError('Please enter a destination address');
+                    return;
+                }
+
+                if (userLocation) {
+                    try {
+                        const routeResponse = await fetch('http://127.0.0.1:5001/calculate_route', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                start_address: `${userLocation.latitude}, ${userLocation.longitude}`,
+                                end_address: destinationAddress
+                            })
+                        });
+                        
+                        const routeFeature = await routeResponse.json(); // Expecting a single GeoJSON Feature
+                        
+                        if (routeFeature.error) {
+                            showError(routeFeature.error);
+                            return;
+                        }
+
+                        // Clear existing route options
+                        const routeOptions = document.getElementById('routeOptions');
+                        routeOptions.innerHTML = '<h4>Route Information:</h4>';
+
+                        // Add route option to panel
+                        routeOptions.innerHTML += createRouteOption(routeFeature);
+
+                        // Draw route on map
+                        const routeGraphic = new Graphic({
+                            geometry: {
+                                type: "polyline",
+                                paths: routeFeature.geometry.coordinates, // Get coordinates from GeoJSON feature
+                            },
+                            symbol: {
+                                type: "simple-line",
+                                color: [128, 0, 128],  // Purple
+                                width: 4,
+                                style: "solid"
+                            }
+                        });
+                        view.graphics.add(routeGraphic);
+                        routeGraphics.push(routeGraphic);
+
+                        // Zoom to show the route
+                        view.goTo({
+                            target: routeGraphic,
+                            padding: 50
+                        });
+
+                    } catch (error) {
+                        console.error('Error:', error);
+                        showError('Error calculating route. Please try again.');
+                    }
+                } else {
+                    showError('Please allow location access to find routes');
+                }
+            });
+
+            view.when(function() {
+                console.log("Map view is ready");
+            });
+
+            // Function to handle errors
+            function showError(message) {
+                const errorDiv = document.getElementById('error-message');
+                errorDiv.textContent = message;
+                setTimeout(() => {
+                    errorDiv.textContent = '';
+                }, 5000);
+            }
+        });
+    </script>
+</body>
+</html>
+
